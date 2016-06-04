@@ -1,0 +1,586 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Workflow PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<Workflow  explicitTransitions="true"  libraries="Identity,Role,PolicyViolation,LCM,BatchRequest"  name="eBay-Workflow-SuspendOrTerminate" type="IdentityLifecycle">
+  <Variable input="true" name="trigger">
+    <Description>The IdentityTrigger</Description>
+  </Variable>
+  <Variable input="true" name="event" transient="true">
+    <Description>
+      The IdentityChangeEvent.  It can be used to build
+      the provisioning plan, but does not need to be
+      persisted with the case, so marked as transient.
+    </Description>
+  </Variable>
+  <Variable input="true" name="identityName">
+    <Description>The name of the identity.</Description>
+  </Variable>
+  <Variable input="true" name="flow"/>
+  <Variable initializer="script:context.getObjectByName(Identity.class,identityName).getManagerStatus()" name="managerStatus">
+    <Description>
+    Check if User is Manager
+    </Description>
+  </Variable>
+  <Variable initializer="false" input="true" name="trace">
+    <Description>
+      Used for debugging this workflow and when set to true trace
+      will be sent to stdout.
+    </Description>
+  </Variable>
+  <Variable name="plan">
+    <Description>The provisioning plan, which is built by a service method. </Description>
+  </Variable>
+  <Variable name="project">
+    <Description>
+      ProvisioningProject which is just a compiled version of the ProvisioningPlan.
+    </Description>
+  </Variable>
+  <Variable input="true" name="identityStatus">
+    <Description>
+    Check Current User Status of identity
+    </Description>
+  </Variable>
+  <Variable name="deleteUserMap">
+    <Description>
+	Delete User List 
+    </Description>
+  </Variable>
+  <Variable name="emailArgList" >
+    <Description>
+      List of hash maps of all necessary emails that need to be sent out. 
+    </Description>
+  </Variable>
+  <Variable name="roleAdvOrroleAdvDelMap" >
+    <Description>
+      List of emails to Notify if User is memeber of Role Adv Or Role Adv Del and List
+	  of workgroups ,User has to remove from them
+    </Description>
+  </Variable>
+  <Variable initializer="eBay-Workflow-Execute-Plan" input="true" name="scheduleWorkflowName">
+    <Description>
+     A workflow that should be schedule for termination User if delete After N days
+	 selected for application.
+    </Description>
+  </Variable>
+  <Variable initializer="none" input="true" name="notificationScheme">
+    <Description>
+     A string that specifies who should be notified when the request has been complete.
+     The value can be null or a csv of one or more of the following options.
+
+     none or null
+       disable notifications
+
+     user
+       Identity that is being update will be notified.
+
+     manager
+       The manager of the Identity that is being updated will be notified.
+
+     requester
+       The person that has requested the update will be notified.
+    </Description>
+  </Variable>
+  <Variable name="launcher"  initializer="string:spadmin"/>
+  <RuleLibraries>
+	<Reference class="sailpoint.object.Rule" name="eBay-Rule-Constants"/>
+    <Reference class="sailpoint.object.Rule" name="eBay-Rule-Workflow-Library"/>
+  </RuleLibraries>
+  <Step icon="Start" name="Start" posX="28" posY="10" >
+    <Arg name="flow" value="ref:flow"/>
+	<Transition to="Get RoleAdvOrRoleAdvDel Emails and Workgroups" when="script: (flow.equals(&quot;LOA&quot;))"/>
+    <Transition to="Build Disable Accounts Plan" when="script: (flow.equals(&quot;SuspendAccess&quot;))"/>
+    <Transition to="Build Disable Accounts Plan for termination" when="script: (flow.equals(&quot;TerminateAccess&quot;))"/>
+  </Step>
+  <Step name="Build Disable Accounts Plan" action="call:buildEventPlan" resultVariable="plan">
+	<Arg name="op" value="Disable"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Transition to="Filter Authoritative Application"/>
+  </Step>
+  <Step name="Filter Authoritative Application">
+  <Description>
+		Filter for Authoritative Application to remove from Disable Plan.
+     </Description>
+    <Script>
+      <Source>
+			<![CDATA[
+				import sailpoint.object.ProvisioningPlan;
+				
+				ProvisioningPlan plan=filterAuthoritativeApps(plan);
+			 ]]>
+  		</Source>
+    </Script>
+    <Transition to="Execute Disable Accounts Plan" when="script: doProcessPlan(plan)"/>
+	<Transition to="end" />
+  </Step>
+   <Step icon="Task" name="Execute Disable Accounts Plan" posX="658" posY="126">
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="flow" value="ref:flow"/>
+    <Arg name="plan" value="ref:plan"/>
+    <Arg name="trace" value="ref:trace"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="optimisticProvisioning" value="false"/>
+    <Arg name="foregroundProvisioning" value="true"/>
+	<Arg name="notificationScheme" value="ref:notificationScheme"/>
+    <Arg name="approvalScheme" value="none"/>
+	<Arg name="enableRetryRequest" value="true"/>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-Execute-Plan"/>
+    </WorkflowRef>
+    <Transition to="Build plan to remove delegate setup"/>
+  </Step>
+  <Step name="Build Disable Accounts Plan for termination" action="call:buildEventPlan" resultVariable="plan">
+	<Arg name="op" value="Disable"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Transition to="Filter Authoritative Application for Termination"/>
+  </Step>
+  <Step name="Filter Authoritative Application for Termination">
+  <Description>
+		Filter for Authoritative Application to remove from Disable Plan.
+     </Description>
+    <Script>
+      <Source>
+			<![CDATA[
+				import sailpoint.object.ProvisioningPlan;
+				
+				ProvisioningPlan plan=filterAuthoritativeApps(plan);
+			 ]]>
+  		</Source>
+    </Script>
+   	<Transition to="Filter Non Support Disable Application" />
+  </Step>
+  <Step name="Filter Non Support Disable Application">
+  <Description>
+		Filter if any application doesnot support disable.
+     </Description>
+    <Script>
+      <Source>
+			
+				import sailpoint.object.ProvisioningPlan;
+				import org.apache.log4j.Logger; 
+				
+				Logger wfLogger = Logger.getLogger("ebay.iam.iiq.workflow-EnableAccess-NotSupportDisableStep");
+				
+				ProvisioningPlan plan=filterNonSupportDisableApps(plan,"no");
+				if(plan!=null){
+				wfLogger.debug("******Plan after filtering..::***********"+plan.toXml());
+				}
+			
+			 
+		</Source>
+    </Script>
+    <Transition to="Execute Disable Accounts Plan for termination" when="script: doProcessPlan(plan)"/>
+	<Transition to="Get Assigned Roles Plan" />
+  </Step>
+   <Step icon="Task" name="Execute Disable Accounts Plan for termination" posX="658" posY="126">
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="flow" value="ref:flow"/>
+    <Arg name="plan" value="ref:plan"/>
+    <Arg name="trace" value="ref:trace"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="optimisticProvisioning" value="false"/>
+    <Arg name="foregroundProvisioning" value="true"/>
+	<Arg name="notificationScheme" value="ref:notificationScheme"/>
+    <Arg name="approvalScheme" value="none"/>
+	<Arg name="enableRetryRequest" value="true"/>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-Execute-Plan"/>
+    </WorkflowRef>
+    <Transition to="Get Assigned Roles Plan" />
+    </Step>
+  <Step icon="Task" name="Get Assigned Roles Plan" resultVariable="plan">
+    <Arg name="identityName" value="ref:identityName"/>
+    <Description>
+		Remove assigned Roles if User Terminated.
+     </Description>
+    <Script>
+      <Source>
+		<![CDATA[ 
+		import sailpoint.object.ProvisioningPlan;
+		import sailpoint.object.Identity;
+		import java.util.List;
+		import org.apache.log4j.Logger; 
+				
+		Logger wfLogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-GetAssignedRolesPlanStep");
+		
+		ProvisioningPlan plan=null;
+		Identity identity = context.getObjectByName(Identity.class, identityName);
+		
+		//Get Assigned Roles
+		List assignedRoles = identity.getAssignedRoles();
+		wfLogger.debug("Bundle Roles"+assignedRoles);
+		List assignedRoleNames=new ArrayList();
+         
+        for(Bundle assignedRole:assignedRoles){
+            assignedRoleNames.add(assignedRole.getName());
+        }
+		
+		wfLogger.debug("List of Roles"+assignedRoleNames);
+		
+		if(assignedRoleNames != null && assignedRoleNames.size() > 0) {
+			plan=getAddOrRemoveRolesPlan(assignedRoleNames,identityName,"remove");
+		}
+
+	  	return plan;
+		]]>
+		
+	 </Source>
+    </Script>
+    <Transition to="Execute Remove Assigned Roles Plan" when="script: doProcessPlan(plan)"/>
+	<Transition to="Move Subordinates" when="script: (managerStatus== true) "/>
+    <Transition to="Build plan to remove delegate setup"/>
+  </Step>
+  <Step name="Execute Remove Assigned Roles Plan">
+    <Arg name="trace" value="ref:trace"/>
+    <Arg name="flow" value="ref:flow"/>
+    <Arg name="identityName" value="ref:identityName"/>
+    <Arg name="notificationScheme" value="ref:notificationScheme"/>
+    <Arg name="approvalScheme" value="none"/>
+    <Arg name="plan" value="ref:plan"/>
+	<Arg name="launcher" value="ref:launcher"/>
+	<Arg name="optimisticProvisioning" value="false"/>
+    <Arg name="foregroundProvisioning" value="true"/>
+	<Arg name="enableRetryRequest" value="true"/>
+    <Description>
+      Remove Roles for Terminated User
+	</Description>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-Execute-Plan"/>
+    </WorkflowRef>
+    <Transition to="Move Subordinates" when="script: (managerStatus== true) "/>
+	<Transition to="Build plan to remove delegate setup"/>
+    </Step>
+   <Step name="Move Subordinates">
+    <Arg name="identityName" value="ref:identityName"/>
+    <Arg name="managerName" value="call:getManager"/>
+    <Script>
+      <Source>
+		<![CDATA[
+		import org.apache.log4j.Logger;
+		import sailpoint.object.Identity;
+			
+		Logger wflogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-MoveSubordinates");
+		
+		if(managerName!=null){
+			Identity manager = context.getObjectByName(Identity.class, managerName);
+			wflogger.debug("Manager Name:::::::::"+managerName);
+			updateSubordinatesManager(identityName,manager);
+	  	}
+		]]>
+    </Source>
+    </Script>
+    <Transition to="Build plan to remove delegate setup"/>
+  </Step>
+  <Step name="Build plan to remove delegate setup" resultVariable="plan">
+    <Arg name="identityName" value="ref:identityName"/>
+    <Description>
+      To Check if user is delegatee of any Awf or People Manager,if yes,Remove delegate set up for Request delegate Manager.
+	  Remove delegate from identity attribute and OUD application
+    </Description>
+    <Script>
+      <Source>
+		<![CDATA[
+		import org.apache.log4j.Logger;
+		import sailpoint.object.Identity;
+		import java.util.List;
+		import sailpoint.object.Filter;
+		import sailpoint.object.QueryOptions;
+			
+		Logger wflogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-CheckDelegatorStep");
+		
+		QueryOptions qo = new QueryOptions(); 
+		qo.addFilter(Filter.eq("delegate",identityName)); 
+   
+		//Get Managers list who has delegatee as identityName
+		
+  		List delegateManagerList = context.getObjects(Identity.class,qo);
+		wflogger.debug("List of delegate Manager"+delegateManagerList);
+		
+			if(delegateManagerList!=null && delegateManagerList.size() > 0){
+			wflogger.debug("List of delegate Manager is not empty"+delegateManagerList);
+			
+			return removeSuspendedOrTerminatedDelegatee(delegateManagerList,KEY_OUDAPPNAME);
+			}
+		]]>	
+		
+	 </Source>
+    </Script>
+	<Transition to="Execute Delegate Plan" when="script: doProcessPlan(plan)"/>
+	<Transition to="Build Delete Accounts Plan for immediate termination" when="script: (flow.equals(&quot;TerminateAccess&quot;)) &amp;&amp; !doProcessPlan(plan)"/>
+    <Transition to="Get RoleAdvOrRoleAdvDel Emails and Workgroups"/>
+  </Step>
+  <Step icon="Task" name="Execute Delegate Plan" posX="658" posY="126">
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="flow" value="Remove Delegate Access"/>
+    <Arg name="plan" value="ref:plan"/>
+    <Arg name="trace" value="ref:trace"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Arg name="optimisticProvisioning" value="false"/>
+    <Arg name="foregroundProvisioning" value="true"/>
+	<Arg name="enableRetryRequest" value="true"/>
+	<Arg name="approvalScheme" value="none"/>
+    <Arg name="notificationScheme" value="none"/>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-Execute-Plan"/>
+    </WorkflowRef>
+    <Transition to="Build Delete Accounts Plan for immediate termination" when="script: (flow.equals(&quot;TerminateAccess&quot;))"/>
+    <Transition to="Get RoleAdvOrRoleAdvDel Emails and Workgroups"/>
+  </Step>
+   <Step name="Build Delete Accounts Plan for immediate termination" action="call:buildEventPlan" resultVariable="plan">
+   <Description>
+		Delete Links if application does not support disable.
+     </Description>
+	<Arg name="op" value="Delete"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Transition to="Filter Authoritative Application for immediate termination"/>
+  </Step>
+  <Step name="Filter Authoritative Application for immediate termination">
+  <Description>
+		Filter for Authoritative Application to remove from Disable Plan.
+     </Description>
+    <Script>
+      <Source>
+			<![CDATA[
+				import sailpoint.object.ProvisioningPlan;
+				import org.apache.log4j.Logger; 
+				
+				Logger wfLogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-FilterAuthorativeApplicationStep");
+				
+				ProvisioningPlan plan=filterAuthoritativeApps(plan);
+				if(plan!=null){
+				wfLogger.debug("******Plan after filtering..::***********"+plan.toXml());
+				}
+				
+			]]>
+  		</Source>
+    </Script>
+   	<Transition to="Filter Support Disable Application" />
+  </Step>
+  <Step name="Filter Support Disable Application">
+   <Description>
+		Filter if any application supports disable.
+     </Description>
+    <Script>
+      <Source>
+			
+				import sailpoint.object.ProvisioningPlan;
+				import org.apache.log4j.Logger; 
+				
+				Logger wfLogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-SupportDisableStep");
+				
+				ProvisioningPlan plan=filterNonSupportDisableApps(plan,"yes");
+				if(plan!=null){
+				wfLogger.debug("******Plan after filtering..::***********"+plan.toXml());
+				}
+			
+			 
+		</Source>
+    </Script>
+    <Transition to="Execute Disable Accounts Plan for immediate termination" when="script: doProcessPlan(plan)"/>
+	<Transition to="Identify Apps to Delete"/>
+  </Step>
+   <Step icon="Task" name="Execute Disable Accounts Plan for immediate termination" posX="658" posY="126">
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="flow" value="ref:flow"/>
+    <Arg name="plan" value="ref:plan"/>
+    <Arg name="trace" value="ref:trace"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Arg name="launcher" value="ref:launcher"/>
+    <Arg name="optimisticProvisioning" value="false"/>
+    <Arg name="foregroundProvisioning" value="true"/>
+	<Arg name="notificationScheme" value="ref:notificationScheme"/>
+    <Arg name="approvalScheme" value="none"/>
+	<Arg name="enableRetryRequest" value="true"/>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-Execute-Plan"/>
+    </WorkflowRef>
+    <Transition to="Identify Apps to Delete"/>
+  </Step>
+  <Step name="Identify Apps to Delete" resultVariable="deleteUserMap">
+    <Arg name="identityName" value="ref:identityName"/>
+    <Description>
+      To remove User after disable operation if application is enabled for delete after "N" days Removal
+    </Description>
+    <Script>
+      <Source>
+		<![CDATA[ 
+			import java.util.List;	
+			import sailpoint.object.Link;
+			import sailpoint.object.Application;
+			import java.util.HashMap;
+			import java.util.Map;
+			import org.apache.log4j.Logger;
+			
+			Logger wflogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-deleteUserMapStep");  //Get Logger
+			Map map=new HashMap();
+			
+			List links = getIdentityLinks(identityName);  //Get links of identity
+			wflogger.debug(":::::Links of identity:::::::"+links);
+			
+			if (null != links && links.size() > 0){
+				for (Link link : links) {			
+					String applicationName = link.getApplicationName();
+					String deleteDays=getApplicationAttribute(applicationName,"deleteBy");
+					
+					if(deleteDays!=null && isValidPositiveNumber(deleteDays)==true){
+						//Create map for user based on Application and delete days after termination
+						map.put(applicationName,deleteDays);
+					}
+					
+				}//exit for loop
+			}//exit if condition	
+			wflogger.debug("After checking Application and N days value for deletion"+map);	
+			return map;
+		]]>
+      </Source>
+    </Script>
+    <Transition to="Schedule Account Deletion" when="script: !(deleteUserMap == null || deleteUserMap.isEmpty())"/>
+    <Transition to="Get RoleAdvOrRoleAdvDel Emails and Workgroups"/>
+  </Step>
+  <Step name="Schedule Account Deletion">
+    <Arg name="deleteUserMap" value="ref:deleteUserMap"/>
+    <Arg name="identityName" value="ref:identityName"/>
+    <Arg name="managerStatus" value="ref:managerStatus"/>
+	<Arg name="scheduleWorkflowName" value="ref:scheduleWorkflowName"/>
+	<Script>
+      <Source>
+		//Schedule deletion after user termination
+		scheduleAccountDeletion(wfcontext);
+      </Source>
+    </Script>
+    <Transition to="Get RoleAdvOrRoleAdvDel Emails and Workgroups"/>
+  </Step>
+  <Step name="Get RoleAdvOrRoleAdvDel Emails and Workgroups" resultVariable="roleAdvOrroleAdvDelMap">
+    <Arg name="identityName" value="ref:identityName"/>
+	<Arg name="identityStatus" value="ref:identityStatus"/>
+     <Description>
+    To check if user is owner of any Workgroups and get emails to Notify
+     </Description>
+    <Script>
+      <Source>
+        <![CDATA[ 
+		import java.util.HashMap;
+		import java.util.Map;
+		import sailpoint.object.Identity;
+		
+		Map emailsTo=new HashMap();
+		
+		Identity identity=context.getObjectByName(Identity.class, identityName );
+		
+		if(identity!=null){
+		emailsTo=getRoleAdvocateOrRoleAdvocateDelegateDetails(identity,identityStatus);
+		}
+		
+		return emailsTo;
+		]]>
+	 </Source>
+    </Script>
+    <Transition to="Build Email Args List for Role Advocate Delegate" when="script:roleAdvOrroleAdvDelMap!=null &amp;&amp; !roleAdvOrroleAdvDelMap.isEmpty() &amp;&amp; roleAdvOrroleAdvDelMap.get(&quot;roleAdvDelTo&quot;)!=null"/>
+	<Transition to="Build Email Args List for Role Advocate" when="script:roleAdvOrroleAdvDelMap!=null &amp;&amp; !roleAdvOrroleAdvDelMap.isEmpty() &amp;&amp; 
+	roleAdvOrroleAdvDelMap.get(&quot;roleAdvDelTo&quot;)==null &amp;&amp; roleAdvOrroleAdvDelMap.get(&quot;roleAdvTo&quot;)!=null"/>
+    <Transition to="end"/>
+  </Step>
+  <Step name="Build Email Args List for Role Advocate Delegate" resultVariable="emailArgList">
+  <Arg name="identityStatus" value="ref:identityStatus"/>
+  <Arg name="roleAdvOrroleAdvDelMap" value="ref:roleAdvOrroleAdvDelMap"/>  
+  <Arg name="templateName" value="eBay-EmailTemplate-RoleAdvocateDelegateNotification"/>  
+  	<Script>
+  		<Source>
+		<![CDATA[ 
+		import java.util.HashMap;
+		import java.util.Map;
+		import java.util.List;
+		import java.util.ArrayList;
+		import org.apache.log4j.Logger; 
+				
+		Logger wfLogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-RoleAdvocateDelegateBuildEmailArgs");
+		
+		Map emailArgMap=new HashMap();
+		List emailArgList=new ArrayList();
+		
+		emailArgMap.put("userStatus",identityStatus);
+		
+		String roleAdvDelEmails=roleAdvOrroleAdvDelMap.get("roleAdvDelTo");
+		emailArgMap.put("to",roleAdvDelEmails); //Notify forRoleAdvDel
+		
+		String workgroup=roleAdvOrroleAdvDelMap.get("roleAdvDelWorkgroups");
+		emailArgMap.put("workgroups",workgroup); //Get all workgroups which user is member of that workgroup
+		
+		emailArgMap.put("emailTemplate",templateName);
+		wfLogger.debug("emailArgMap"+emailArgMap);
+		
+		if(emailArgMap!=null && !emailArgMap.isEmpty()){
+		emailArgList.add(emailArgMap);
+		}
+		wfLogger.debug("********Role Advocate Delegate emailArgList*******"+emailArgList);
+		return emailArgList;
+		]]>		
+  		</Source>
+  	</Script>
+	<Transition to="Build Email Args List for Role Advocate" when="script: roleAdvOrroleAdvDelMap.get(&quot;roleAdvTo&quot;)!=null"/>
+  	<Transition to="Send Emails"/>
+  </Step>
+  <Step name="Build Email Args List for Role Advocate" resultVariable="emailArgList">
+  <Arg name="identityStatus" value="ref:identityStatus"/>
+  <Arg name="emailArgList" value="ref:emailArgList"/>
+  <Arg name="roleAdvOrroleAdvDelMap" value="ref:roleAdvOrroleAdvDelMap"/>  
+  <Arg name="templateName" value="eBay-EmailTemplate-RoleAdvocateNotification"/>  
+  	<Script>
+  		<Source>
+		<![CDATA[ 
+		import java.util.HashMap;
+		import java.util.Map;
+		import java.util.List;
+		import java.util.ArrayList;
+		import org.apache.log4j.Logger; 
+				
+		Logger wfLogger = Logger.getLogger("ebay.iam.iiq.workflow-SuspendOrTerminate-RoleAdvocateBuildEmailArgs");
+		Map emailArgMap=new HashMap();
+		
+		emailArgMap.put("userStatus",identityStatus);
+		
+		String roleAdvEmails=roleAdvOrroleAdvDelMap.get("roleAdvTo");
+		emailArgMap.put("to",roleAdvEmails); //Notify forRoleAdvDel
+		
+		String workgroup=roleAdvOrroleAdvDelMap.get("roleAdvWorkgroups");
+		emailArgMap.put("workgroups",workgroup); //Get all workgroups which user is member of that workgroup
+		
+		emailArgMap.put("emailTemplate",templateName);
+		wfLogger.debug("emailArgMap"+emailArgMap);
+		
+		if(emailArgMap!=null && !emailArgMap.isEmpty()){
+			if(emailArgList==null){
+			List emailArgList=new ArrayList();
+			emailArgList.add(emailArgMap);
+			wfLogger.debug("********Role Advocate emailArgList*******"+emailArgList);
+			return emailArgList;
+			}
+			else{
+			wfLogger.debug("********Role Advocate emailArgList*******"+emailArgList);
+			emailArgList.add(emailArgMap);
+			return emailArgList;
+			}
+			
+		}
+		wfLogger.debug("********Role Advocate emailArgList*******"+emailArgList);
+		return emailArgList;
+		]]>		
+  		</Source> 
+  	</Script>
+  	<Transition to="end" when="emailArgList == null"/>
+  	<Transition to="Send Emails"/>
+  </Step>
+  <Step name="Send Emails">
+	  	<Arg name="emailArgList" value="ref:emailArgList"/>
+		<Arg name="identityName" value="ref:identityName"/>
+	    <Description>
+	      Call the standard subprocess that will handle the built-in
+	      owner, manager and security officer approval schemes.
+	    </Description>
+	    <WorkflowRef>
+	      <Reference class="sailpoint.object.Workflow" name="ebay-Workflow-SendEmail-Notifications"/>
+	    </WorkflowRef>
+	   <Transition to= "end"/>
+	</Step>
+<Step icon="Stop" name="end" posX="650" posY="192"/>
+</Workflow>

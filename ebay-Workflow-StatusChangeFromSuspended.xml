@@ -1,0 +1,122 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!DOCTYPE Workflow PUBLIC "sailpoint.dtd" "sailpoint.dtd">
+<Workflow explicitTransitions="true" libraries="Identity,Role,PolicyViolation,LCM,BatchRequest" name="ebay-Workflow-StatusChangeFromSuspended" type="IdentityLifecycle">
+  <Variable input="true" name="trigger">
+    <Description>The IdentityTrigger</Description>
+  </Variable>
+  <Variable input="true" name="event" transient="true">
+    <Description>
+      The IdentityChangeEvent.  It can be used to build
+      the provisioning plan, but does not need to be
+      persisted with the case, so marked as transient.
+    </Description>
+  </Variable>
+  <Variable input="true" name="identityName">
+    <Description>The name of the identity.</Description>
+  </Variable>
+  <Variable initializer="false" input="true" name="trace">
+    <Description>
+      Used for debugging this workflow and when set to true trace
+      will be sent to stdout.
+    </Description>
+  </Variable>
+  <Variable name="project">
+    <Description>
+      ProvisioningProject which is just a compiled version of the ProvisioningPlan.
+    </Description>
+  </Variable>
+  <Variable name="identityStatus">
+    <Description>
+    Check User Status value for identity
+    </Description>
+	<Script>
+      <Source>
+        import org.apache.log4j.Logger;
+		
+		Logger custlogger = Logger.getLogger("ebay.iam.iiq.workflow-StatusChangeFromSuspended-CheckidentityStatus");
+		
+		String status=getIdentityAttribute(identityName,"status");
+		custlogger.debug("User Status"+status);
+			
+		return status;
+	</Source>
+    </Script>
+  </Variable>
+  <Variable  name="flow">
+    <Description>Get flow based on USer status </Description>
+  </Variable>
+  <Variable initializer="none" name="approvalScheme">
+    <Description>No Approval required when Ststus Changed from Active </Description>
+  </Variable>
+  <RuleLibraries>
+   <Reference class="sailpoint.object.Rule" name="eBay-Rule-Workflow-Library"/>
+    <Reference class="sailpoint.object.Rule" name="Workflow Library"/>
+  </RuleLibraries>
+  <Step icon="Start" name="Start" posX="28" posY="10" wait="1" >
+    <Transition to="Set Flow"/>
+  </Step>
+  <Step name="Set Flow" resultVariable="flow">
+    <Arg name="identityStatus" value="ref:identityStatus"/>
+    <Script>
+      <Source>
+                
+		import sailpoint.object.Identity;
+		import org.apache.log4j.Logger;
+		
+		Logger custlogger = Logger.getLogger("ebay.iam.iiq.workflow.StatusChangeFromSuspended.setFlow");
+		
+		String flow=getFlow("suspended",identityStatus);
+		custlogger.debug("User Status"+flow);
+		
+		return flow;
+		
+     </Source>
+    </Script>
+	<Transition to="Enable Access Subprocess" when="script: isValidFlow(flow) &amp;&amp; flow.equals(&quot;EnableAccess&quot;)"/>
+    <Transition to="Suspended or Withdrawn Subprocess" when="script: isValidFlow(flow) &amp;&amp; !(flow.equals(&quot;EnableAccess&quot;))"/>
+	<Transition to="end"/>
+  </Step>
+  <Step name="Enable Access Subprocess" posX="172" posY="46" >
+    <Arg name="trace" value="ref:trace"/>
+    <Arg name="identityStatus" value="ref:identityStatus"/>
+    <Arg name="flow" value="ref:flow"/>
+    <Arg name="identityName" value="ref:identityName"/>
+    <Arg name="approvalScheme" value="none"/>
+    <Description>
+     	Enable the account in the identity update workflow.</Description>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-EnableAccess"/>
+    </WorkflowRef>
+    <Transition to="end"/>
+  </Step>
+  <Step name="Suspended or Withdrawn Subprocess" posX="272" posY="56">
+    <Arg name="trace" value="ref:trace"/>
+    <Arg name="identityStatus" value="ref:identityStatus"/>
+    <Arg name="flow" value="ref:flow"/>
+    <Arg name="identityName" value="ref:identityName"/>
+    <Arg name="approvalScheme" value="none"/>
+    <Description>
+      Disable the account in the identity update workflow.</Description>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-SuspendOrTerminate"/>
+    </WorkflowRef>
+    <Transition to="end"/>
+  </Step>
+  <Step catches="complete" icon="Catches" name="Finalize">
+    <Arg name="project" value="ref:project"/>
+	<Arg name="errors" value="script:return wfcase.getMessages();"/>
+    <Arg name="trace" value="ref:trace"/>
+    <Arg name="flow" value="ref:flow"/>
+	<Arg name="identityName" value="ref:identityName"/>
+    <Arg name="case" value="Workflow"/>
+	<Arg name="caseType" value="Workflow"/>
+    <Description>
+      Call the standard subprocess that can audit/finalize the request.
+    </Description>
+    <WorkflowRef>
+      <Reference class="sailpoint.object.Workflow" name="eBay-Workflow-Finalize"/>
+    </WorkflowRef>
+	<Transition to="end"/>
+  </Step>
+  <Step icon="Stop" name="end" posX="300" posY="100"/>
+</Workflow>
